@@ -1,0 +1,28 @@
+
+IMAGE_HEIGHT = 256
+IMAGE_WIDTH = 256
+SEGMENTATION_HEIGHT = 256
+SEGMENTATION_WIDTH = 256
+CROPS_PER_IMAGE = 4
+TRAIN_IMAGES = 39704
+TEST_IMAGES = 4957
+
+RESTORE = 0
+SAVE_MODEL = 1
+DEBUG = 0
+
+OPTIMIZATION_EPOCHS = 1
+EVALUATIONS = 1
+
+MOMENTUM = 0.9
+WEIGHT_DECAY = 0.0005
+LR_DECAY = 0.95
+
+CLASSES = 92
+BATCH_SIZE = 1
+
+DATASET_PATH = "/Users/albertbou/PycharmProjects/DeepLab_v3/"
+LOGS_DIR = "/Users/albertbou/PycharmProjects/DeepLab_v3/logs/"
+SAVE_PATH = "/Users/albertbou/PycharmProjects/DeepLab_v3/checkpoints/"
+RESTORE_PATH = SAVE_PATH + "deepLabv3_model.ckpt"
+
