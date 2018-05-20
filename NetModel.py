@@ -24,53 +24,57 @@ class deepLabNet:
 
     def __init__(self):
 
-        self.X = tf.placeholder(tf.float32, shape=(None, IMAGE_HEIGHT, IMAGE_WIDTH, 3))
-        self.y = tf.placeholder(tf.int32, shape=(None, SEGMENTATION_HEIGHT, SEGMENTATION_WIDTH, 1))
         self.lr = tf.placeholder(tf.float32)
-        self.pkeep = tf.placeholder(tf.float32)
-        self.is_train = tf.placeholder(tf.bool, name="is_train")
 
     # BUILD UP THE MODEL ***********************************************************************************************
 
-    def build_model(self): # ResNet 18
-        print('\nBuilding model')
+    def build_model(self, X, y, is_train=tf.constant(True), pkeep = 1): # ResNet 18
+
+        if pkeep != 1:
+            print('\nBuilding train model')
+        else:
+            print('\nBuilding validation model')
 
         # filters = [128, 128, 256, 512, 1024]
         filters = [64, 64, 128, 256, 512]
         kernels = [7, 3, 3, 3, 3]
         strides = [2, 0, 2, 2, 2]
 
+        size = tf.shape(X)
+        height = size[1]
+        width = size[2]
+
         # conv1
         print('\tBuilding unit: conv1')
         with tf.variable_scope('conv1'):
-            x = myconv(self.X, kernels[0], filters[0], strides[0], name="conv")
-            x = mybn(x, self.is_train, name="bn")
+            x = myconv(X, kernels[0], filters[0], strides[0], name="conv")
+            x = mybn(x, is_train, name="bn")
             x = myrelu(x)
             self.shape_conv1 = tf.shape(x)
             x = tf.nn.max_pool(x, [1, 3, 3, 1], [1, 2, 2, 1], 'SAME')
 
         # conv2_x
-        x = residual_block(x,kernels[1], self.is_train, name='conv2_1')
-        x = residual_block(x, kernels[1], self.is_train, name='conv2_2')
+        x = residual_block(x,kernels[1], is_train, name='conv2_1')
+        x = residual_block(x, kernels[1], is_train, name='conv2_2')
         self.shape_conv2 = tf.shape(x)
 
         # conv3_x
-        x = first_residual_block(x, kernels[2], filters[2], strides[2], self.is_train, name='conv3_1')
-        x = residual_block(x, kernels[2], self.is_train, name='conv3_2')
+        x = first_residual_block(x, kernels[2], filters[2], strides[2], is_train, name='conv3_1')
+        x = residual_block(x, kernels[2], is_train, name='conv3_2')
         self.shape_conv3 = tf.shape(x)
 
         # conv4_x
-        x = first_residual_block(x, kernels[3], filters[3], strides[3], self.is_train, name='conv4_1')
-        x = residual_block(x, kernels[3], self.is_train, name='conv4_2')
+        x = first_residual_block(x, kernels[3], filters[3], strides[3], is_train, name='conv4_1')
+        x = residual_block(x, kernels[3], is_train, name='conv4_2')
         self.shape_conv4 = tf.shape(x)
 
         # conv5_x
-        x = first_residual_atrous_block(x, kernels[4], filters[4], strides[4], self.is_train, name='conv5_1')
-        x = residual_atrous_block(x, kernels[4], self.is_train, name='conv5_2')
+        x = first_residual_atrous_block(x, kernels[4], filters[4], strides[4], is_train, name='conv5_1')
+        x = residual_atrous_block(x, kernels[4], is_train, name='conv5_2')
         self.shape_conv5 = tf.shape(x)
 
         # aspp
-        x = atrous_spatial_pyramid_pooling_block(x, self.is_train, depth=256, name = 'aspp_1')
+        x = atrous_spatial_pyramid_pooling_block(x, is_train, depth=256, name = 'aspp_1')
         self.shape_aspp = tf.shape(x)
 
         print('\tBuilding unit: class scores') # Maybe another layer ???
@@ -79,12 +83,12 @@ class deepLabNet:
 
         # upsample logits
         print('\tBuilding unit: upsample')
-        x = tf.image.resize_images(
+        logits = tf.image.resize_images(
             x,
-            tf.stack([SEGMENTATION_HEIGHT, SEGMENTATION_WIDTH]),
+            tf.stack([height, width]),
             method=tf.image.ResizeMethod.BILINEAR,
             align_corners=False)
-        logits = x
+
         self.shape_upsampled_logits = tf.shape(logits)
 
         logits_by_num_classes = tf.reshape(logits, [-1, CLASSES])
@@ -94,7 +98,7 @@ class deepLabNet:
         probs_by_num_classes = tf.reshape(probs, [-1, CLASSES])
         preds = tf.argmax(logits, axis=3, output_type=tf.int32)
         preds_flat = tf.reshape(preds, [-1, ])
-        labels_flat = tf.reshape(self.y, [-1, ])
+        labels_flat = tf.reshape(y, [-1, ])
 
         # Remove non valid indices
         valid_indices = tf.multiply(tf.to_int32(labels_flat <= CLASSES - 1), tf.to_int32(labels_flat > -1))
@@ -106,7 +110,7 @@ class deepLabNet:
 
         # ACCURACY *****************************************************************************************************
 
-        self.pixel_acc, self.mean_iou = compute_accuracy(valid_preds, valid_labels)
+        self.pixel_acc, self.mean_iou, self.per_class_acc = compute_accuracy(valid_preds, valid_labels)
         summary_scalar(self.pixel_acc, name="pixel_accuracy")
         summary_scalar(self.mean_iou, name="mean_iou")
 
@@ -116,14 +120,15 @@ class deepLabNet:
                                                                               labels=valid_labels,
                                                                               name="entropy")))
         sys.stdout.flush()
-        return valid_logits, valid_preds, self.cross_entropy, self.pixel_acc, self.mean_iou
+
+        return valid_logits, valid_preds, self.cross_entropy, self.pixel_acc, self.mean_iou, self.per_class_acc
 
     # BUILD TRAIN OPERATION ********************************************************************************************
 
-    def build_train_op(self):
+    def build_train_op(self, X, y, is_train, pkeep):
 
         # Build Model
-        logits, preds, loss, pixel_acc, mean_iou = self.build_model()
+        logits, preds, loss, pixel_acc, mean_iou, per_class_acc = self.build_model(X, y, is_train, pkeep)
 
         # Learning rate - save in summary
         tf.summary.scalar('learing_rate', self.lr)
@@ -153,121 +158,56 @@ class deepLabNet:
 
         # Batch normalization moving average update
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-        self.train_op = tf.group(*(update_ops + [apply_grad_op])) # runs all operarions
+        train_op = tf.group(*(update_ops + [apply_grad_op])) # runs all operarions
 
         print("Setting up summary op")
-        self.summary_op = tf.summary.merge_all()
+        summary_op = tf.summary.merge_all()
+
+        return loss, pixel_acc, mean_iou, per_class_acc, train_op, summary_op
 
     # TRAIN EPOCH ******************************************************************************************************
 
-    def train_epoch(self, sess, train_images, train_labels, current_learning_rate, dropout):
+    def train_epoch(self, sess, current_learning_rate):
 
-        train_cost = []
-        train_accuracy_miou = []
-        train_accuracy_pixel = []
-
+        sess.run(self.reset_op)
+        epoch_loss = 0
         steps = int(float(TRAIN_IMAGES) * (float(CROPS_PER_IMAGE) / float(BATCH_SIZE)))
 
         for i in range(steps):
-            batch_X, batch_Y = sess.run([train_images, train_labels])
-            batch_X, batch_Y = preprocess_data(batch_X, batch_Y)
-            feed_dict = {self.X: batch_X, self.y: batch_Y, self.pkeep: dropout, self.lr: current_learning_rate, self.is_train: 1}
-            sess.run(self.train_op, feed_dict=feed_dict, options=run_options)
-            tc, ta_pix, ta_iou, summary_str = sess.run([self.cross_entropy, self.pixel_acc, self.mean_iou, self.summary_op],
-                                                       feed_dict=feed_dict,
-                                                       options=run_options)
-            if DEBUG == 1:
+            feed_dict = {self.lr: current_learning_rate}
+            tr_loss, tr_pixel_acc, tr_mean_iou_acc, tr_mean_per_class_acc, _ = sess.run(
+                [self.train_loss, self.train_pixel_acc, self.train_mean_iou_acc, self.train_mean_per_class_acc, self.train_step],
+                feed_dict=feed_dict, options=run_options)
+            if np.isnan(tr_loss):
+                print('got NaN as the loss value for 1 image')
+            else:
+                epoch_loss += tr_loss
+
+            if DEBUG:
+                summary_str = sess.run([self.summary_op], feed_dict=feed_dict, options=run_options)
                 self.summary_writer.add_summary(summary_str)
-            train_cost.append(tc)
-            train_accuracy_pixel.append(ta_pix)
-            train_accuracy_miou.append(ta_iou)
-            if i % 100 == 0:
-                print('batch: ' + str(i))
-                sys.stdout.flush()
 
-        min_position = np.argmin(train_cost)
-        tc_min = train_cost[min_position]
-        ta_pix_min = train_accuracy_pixel[min_position]
-        ta_iou_min = train_accuracy_miou[min_position]
-
-        return tc_min, ta_pix_min, ta_iou_min
+        epoch_loss = epoch_loss / steps
+        return epoch_loss, tr_pixel_acc, tr_mean_iou_acc, tr_mean_per_class_acc
 
     # GET VAL COST/ACC *************************************************************************************************
 
-    def evaluate_model_on_test_set(self, sess, test_images, test_labels):
+    def evaluate_model_on_val_set(self, sess):
 
-        test_cost = []
-        test_accuracy_miou = []
-        test_accuracy_pixel = []
-
-        steps = int(float(TEST_IMAGES) * (float(CROPS_PER_IMAGE) / float(BATCH_SIZE)))
+        sess.run(self.reset_op)
+        epoch_loss = 0
+        steps = int(float(VALIDATION_IMAGES) * (float(CROPS_PER_IMAGE) / float(BATCH_SIZE)))
 
         for i in range(steps):
-            batch_X, batch_Y = sess.run([test_images, test_labels], options=run_options)
-            batch_X, batch_Y = preprocess_data(batch_X, batch_Y)
-            feed_dict = {self.X: batch_X, self.y: batch_Y, self.pkeep: 1, self.is_train: 1}
-            te_c, te_a_pix, te_a_iou = sess.run([self.cross_entropy, self.pixel_acc, self.mean_iou], feed_dict=feed_dict, options=run_options)
-            test_cost.append(te_c)
-            test_accuracy_pixel.append(te_a_pix)
-            test_accuracy_miou.append(te_a_iou)
-            if i % 100 == 0:
-                print('batch: ' + str(i))
-                sys.stdout.flush()
+            v_loss, v_pixel_acc, v_mean_iou_acc, v_mean_per_class_acc = \
+                sess.run([self.val_loss, self.val_pixel_acc, self.val_mean_iou_acc, self.val_mean_per_class_acc], options=run_options)
+            if np.isnan(v_loss):
+                print('got NaN as the loss value for 1 image')
+            else:
+                epoch_loss += v_loss
 
-        te_c_avg = np.mean(test_cost)
-        te_a_pix_avg = np.mean(test_accuracy_pixel)
-        te_a_iou_avg = np.mean(test_accuracy_miou)
-
-        return te_c_avg, te_a_pix_avg, te_a_iou_avg
-
-    # CHECK NETWORK DIMs ***********************************************************************************************
-
-    def checkDimensions(self):
-        # Initialization
-        init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
-        sess = tf.Session()
-        sess.run(init_op)
-
-        # Toy batch
-        batch_X = np.ones((1, IMAGE_HEIGHT, IMAGE_WIDTH, 3))
-        batch_Y = np.ones((1, SEGMENTATION_HEIGHT, SEGMENTATION_WIDTH, 1))
-
-        print('\nNetwork dimensions:')
-        shape = batch_X.shape
-        print('\tInput: [x, %d %d %d]' % (shape[1],shape[2],shape[3]))
-        shape = np.array(
-            sess.run(self.shape_conv1, feed_dict={self.X: batch_X, self.y: batch_Y, self.is_train: 1, self.pkeep: 1}))
-        print('\tconv 1: [x, %d %d %d]' % (shape[1],shape[2],shape[3]))
-        shape = np.array(
-            sess.run(self.shape_conv2, feed_dict={self.X: batch_X, self.y: batch_Y, self.is_train: 1, self.pkeep: 1}))
-        print('\tconv 2_x: [x, %d %d %d]' % (shape[1], shape[2], shape[3]))
-        shape = np.array(
-            sess.run(self.shape_conv3, feed_dict={self.X: batch_X, self.y: batch_Y, self.is_train: 1, self.pkeep: 1}))
-        print('\tconv 3_x: [x, %d %d %d]' % (shape[1], shape[2], shape[3]))
-        shape = np.array(
-            sess.run(self.shape_conv4, feed_dict={self.X: batch_X, self.y: batch_Y, self.is_train: 1, self.pkeep: 1}))
-        print('\tconv 4_x: [x, %d %d %d]' % (shape[1], shape[2], shape[3]))
-        shape = np.array(
-            sess.run(self.shape_conv5, feed_dict={self.X: batch_X, self.y: batch_Y, self.is_train: 1, self.pkeep: 1}))
-        print('\tconv 5_x: [x, %d %d %d]' % (shape[1], shape[2], shape[3]))
-        shape = np.array(
-            sess.run(self.shape_aspp, feed_dict={self.X: batch_X, self.y: batch_Y, self.is_train: 1, self.pkeep: 1}))
-        print('\taspp: [x, %d %d %d]' % (shape[1], shape[2], shape[3]))
-        shape = np.array(
-            sess.run(self.shape_class_scores,
-                     feed_dict={self.X: batch_X, self.y: batch_Y, self.is_train: 1, self.pkeep: 1}))
-        print('\tpreds: [x, %d %d %d]' % (shape[1], shape[2], shape[3]))
-        shape = np.array(
-            sess.run(self.shape_upsampled_logits, feed_dict={self.X: batch_X, self.y: batch_Y, self.is_train: 1, self.pkeep: 1}))
-        print('\tupsampled logits: [x, %d %d %d]' % (shape[1], shape[2], shape[3]))
-        shape = np.array(
-            sess.run(self.shape_probs,
-                     feed_dict={self.X: batch_X, self.y: batch_Y, self.is_train: 1, self.pkeep: 1}))
-        print('\tprobs: [x, %d %d %d]' % (shape[1], shape[2], shape[3]))
-        shape = np.array(
-            sess.run(self.shape_preds,
-                     feed_dict={self.X: batch_X, self.y: batch_Y, self.is_train: 1, self.pkeep: 1}))
-        print('\tpreds: [x, %d %d %d]' % (shape[1], shape[2], shape[3]))
+        epoch_loss = epoch_loss / steps
+        return epoch_loss, v_pixel_acc, v_mean_iou_acc, v_mean_per_class_acc
 
     # TRAIN MODEL ******************************************************************************************************
 
@@ -275,16 +215,27 @@ class deepLabNet:
 
         learning_rate, dropout, epochs = args
         initial_learning_rate = learning_rate
+        epochs = int(epochs)
 
         # Get images and labels
         with tf.device('/cpu:0'):
             train_images, train_labels = read_and_decode(DATASET_PATH + 'train_dataset.tfrecords', epochs, BATCH_SIZE)
-            test_images, test_labels = read_and_decode(DATASET_PATH + 'test_dataset.tfrecords', epochs, BATCH_SIZE)
+            val_images, val_labels = read_and_decode(DATASET_PATH + 'validation_dataset.tfrecords', epochs, BATCH_SIZE)
+
+        # Define both train and val models
+        with tf.variable_scope("model"):
+            self.train_loss, self.train_pixel_acc, self.train_mean_iou_acc, self.train_mean_per_class_acc, self.train_step, self.summary_op = \
+                self.build_train_op(X=train_images, y=train_labels, pkeep=dropout, is_train=tf.constant(True))
+        with tf.variable_scope("model", reuse=True):
+            self.val_loss, self.val_pixel_acc, self.val_mean_iou_acc, self.val_mean_per_class_acc, _, _ = \
+                self.build_train_op(X=val_images, y=val_labels, pkeep=1, is_train=tf.constant(False))
 
         # Initialization
         init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
         sess = tf.Session()
         sess.run(init_op)
+        stream_vars = [i for i in tf.local_variables() if i.name.split('/')[1] == 'accuracy']
+        self.reset_op = [tf.initialize_variables(stream_vars)]
 
         # Load Imagenet Pretrained Weights
         print("\nLoading ResNet18 pretrained weights")
@@ -294,7 +245,7 @@ class deepLabNet:
         print('Successful:')
         for v in all_vars:
             try:
-                assign_op = v.assign(resnet18_weights.item().get(v.op.name))
+                assign_op = v.assign(resnet18_weights.item().get(v.op.name[6:]))
                 sess.run(assign_op)
                 print('\t' + v.op.name)
             except Exception, e:
@@ -305,7 +256,7 @@ class deepLabNet:
         sys.stdout.flush()
 
         # Create a saver
-        saver = tf.train.Saver(max_to_keep=5)
+        saver = tf.train.Saver(max_to_keep=100)
         if RESTORE is not 0:
             saver.restore(sess, RESTORE_PATH)
             print('Load checkpoint %s' % RESTORE_PATH)
@@ -326,48 +277,66 @@ class deepLabNet:
         val_cost = []
         train_accuracy_pix = []
         train_accuracy_iou = []
+        train_accuracy_per_class = []
         val_accuracy_pix = []
         val_accuracy_iou = []
+        val_accuracy_per_class = []
 
         print("Starting to train...")
         sys.stdout.flush()
 
         try:
-            best_test_cost = float('Inf')
             epoch = 1
+            lowest_val_loss_epoch = 0
+            best_val_loss = float('inf')
+            patience = 0
             while (True):
 
                 # Check start time
                 start = datetime.now()
 
                 # Train for 1 epoch on training set
-                tc, ta_pix, ta_iou = self.train_epoch(sess, train_images, train_labels, learning_rate, dropout)
+                tc, ta_pix, ta_iou, ta_class = self.train_epoch(sess, learning_rate)
+                ta_class = np.mean(ta_class[np.nonzero(ta_class)])
                 train_cost.append(tc)
                 train_accuracy_pix.append(ta_pix)
                 train_accuracy_iou.append(ta_iou)
+                train_accuracy_per_class.append(ta_class)
 
-                # Check on test/val dataset
-                vc, va_pix, va_iou = self.evaluate_model_on_test_set(sess, test_images, test_labels)
+                # Compute cost/accuracy on val dataset
+                vc, va_pix, va_iou, va_class = self.evaluate_model_on_val_set(sess)
+                va_class = np.mean(va_class[np.nonzero(va_class)])
                 val_cost.append(vc)
                 val_accuracy_pix.append(va_pix)
                 val_accuracy_iou.append(va_iou)
+                val_accuracy_per_class.append(va_class)
 
-                # Print epoch information
+                # Print information
                 print("\nEpoch: " + str(epoch))
-                print('\ttrain cost: ' + str(tc))
-                print('\ttrain pixel accuracy: {:.2f}%'.format(ta_pix * 100))
-                print('\ttrain mean iou accuracy: {:.2f}%'.format(ta_iou * 100))
-                print('\ttest cost: ' + str(vc))
-                print('\ttest pixel accuracy: {:.2f}%'.format(va_pix * 100))
-                print('\ttest mean iou accuracy: {:.2f}%'.format(va_iou * 100))
-                sys.stdout.flush()
+                print('\ntrain cost: ' + str(tc))
+                print('train pixel accuracy: {:.2f}%'.format(ta_pix * 100))
+                print('train mean iou accuracy: {:.2f}%'.format(ta_iou * 100))
+                print('train mean per class accuracy: {:.2f}% \n'.format(ta_class * 100))
+                print('val cost: ' + str(vc))
+                print('val pixel accuracy: {:.2f}%'.format(va_pix * 100))
+                print('val mean iou accuracy: {:.2f}%'.format(va_iou * 100))
+                print('val mean per class accuracy: {:.2f}% \n'.format(va_class * 100))
 
                 # Save model if specified
-                if epochs > OPTIMIZATION_EPOCHS and SAVE_MODEL == 1 and vc < best_test_cost and np.isfinite(vc):
-                    best_test_cost = vc
-                    save_path = saver.save(sess, SAVE_PATH + "deepLabv3_model.ckpt")
-                    print("\tEpoch %d - Model saved in path: %s" % (epoch, save_path))
+                if epochs > OPTIMIZATION_EPOCHS and SAVE_MODEL == 1:
+                    save_path = saver.save(sess, SAVE_PATH + "fcn32_model.ckpt", global_step=epoch)
+                    print("Epoch %d - Model saved in path: %s \n" % (epoch, save_path))
                     sys.stdout.flush()
+
+                # Check if loss is lower than in previous epochs
+                if vc <= best_val_loss:
+                    lowest_val_loss_epoch = epoch
+                    patience = 0
+                else:
+                    patience += 1
+                    if patience == 10:
+                        print('End of training due to early stopping! \n')
+                        break
 
                 # Increase epoch and decay learning rate
                 epoch += 1
@@ -377,25 +346,26 @@ class deepLabNet:
                 # Check end time and compute epoch time lapse
                 end = datetime.now()
                 delta = end - start
-                print('\tEpoch trained in %d hours, %d minutes and %d seconds\n' % (
+                print('\tEpoch trained in %d hours, %d minutes and %d seconds' % (
                     delta.seconds // 3600, ((delta.seconds // 60) % 60), (delta.seconds) % 60))
                 sys.stdout.flush()
 
         except tf.errors.OutOfRangeError:
             print('End of training! \n')
-            sys.stdout.flush()
 
         # Save accuracy and cost
-        #if epochs > OPTIMIZATION_EPOCHS and SAVE_MODEL == 1:
-        #    np.save('fcn32_Train_Loss.npy', train_cost)
-        #    np.save('fcn32_Validation_Loss.npy', val_cost)
-        #    np.save('fcn32_Train_Accuracy_Pix.npy', train_accuracy_pix)
-        #    np.save('fcn32_Validation_Accuracy_Pix.npy', val_accuracy_pix)
-        #    np.save('fcn32_Train_Accuracy_Iou.npy', train_accuracy_iou)
-        #    np.save('fcn32_Validation_Accuracy_Iou.npy', val_accuracy_iou)
+        if epochs > OPTIMIZATION_EPOCHS and SAVE_MODEL == 1:
+            np.save('fcn32_train_loss.npy', train_cost)
+            np.save('fcn32_val_loss.npy', val_cost)
+            np.save('fcn32_train_accuracy_pix.npy', train_accuracy_pix)
+            np.save('fcn32_val_accuracy_pix.npy', val_accuracy_pix)
+            np.save('fcn32_train_accuracy_iou.npy', train_accuracy_iou)
+            np.save('fcn32_val_accuracy_iou.npy', val_accuracy_iou)
+            np.save('fcn32_train_accuracy_class.npy', train_accuracy_per_class)
+            np.save('fcn32_val_accuracy_class.npy', val_accuracy_per_class)
 
         # Close summary writer
-        if DEBUG == 1:
+        if DEBUG:
             self.summary_writer.close()
 
         # Stop the threads
@@ -434,30 +404,26 @@ if __name__ == "__main__":
     def execute(args):
         tf.reset_default_graph()
         model = deepLabNet()
-        model.build_train_op()
         output = model.train(args)
         tf.reset_default_graph()
         return output
 
-
-    execute((0.001, 0.55, 200))
-
     # define a search space
 
-    #space = hp.choice('experiment number',
-    #                  [
-    #                      (hp.uniform('learning_rate', 0.001, 0.00001),
-    #                       hp.uniform('dropout_prob', 0.5, 0.8),
-    #                       hp.uniform('Epochs', OPTIMIZATION_EPOCHS, OPTIMIZATION_EPOCHS))
-    #                  ])
+    space = hp.choice('experiment number',
+                      [
+                          (hp.uniform('learning_rate', 0.01, 0.0001),
+                           hp.uniform('dropout_prob', 0.5, 0.8),
+                           hp.uniform('Epochs', OPTIMIZATION_EPOCHS, OPTIMIZATION_EPOCHS))
+                      ])
 
-    #best = fmin(execute, space, algo=tpe.suggest, max_evals=EVALUATIONS)
+    best = fmin(execute, space, algo=tpe.suggest, max_evals=EVALUATIONS)
 
-    #print('Best learningRate: ', best['learning_rate'], 'Best Dropout: ', best['dropout_prob'])
-    #print('-----------------\n')
-    #print('Starting training with optimized hyperparameters... \n')
+    print('Best learningRate: ', best['learning_rate'], 'Best Dropout: ', best['dropout_prob'])
+    print('-----------------\n')
+    print('Starting training with optimized hyperparameters... \n')
 
-    #execute((best['learning_rate'], best['dropout_prob'], 2))
+    execute((best['learning_rate'], best['dropout_prob'], 2))
 
     # Check that prediction works
     # tf.reset_default_graph()

@@ -2,6 +2,7 @@
 # IMPORTS
 
 import tensorflow as tf
+from ImageTransformations import*
 from GlobalVariables import*
 import numpy as np
 import pdb
@@ -34,15 +35,18 @@ def myconv(x, filter_size, out_channel, strides, pad='SAME', name='conv'):
 def myatrouconv(x, filter_size, out_channel, output_stride, pad='SAME', name='atrous_conv'):
     # Step 1: create filter variable
     in_shape = x.get_shape()
+    in_channels = in_shape[-1]
     with tf.variable_scope(name):
         with tf.device('/CPU:0'):
-            #kernel = tf.Variable(identity_initializer([filter_size, filter_size, in_channels, out_channel]),
-            #                         tf.float32, name='kernel')
-            #bias = tf.get_variable('bias', [out_channel], tf.float32, initializer=tf.zeros_initializer())
-            kernel = tf.get_variable('kernel', [filter_size, filter_size, in_shape[3], out_channel],
-                                     tf.float32, initializer=tf.random_normal_initializer(
-                    stddev=np.sqrt(2.0 / filter_size / filter_size / out_channel)))
-        bias = tf.get_variable('bias', [out_channel], tf.float32, initializer=tf.zeros_initializer())
+            kernel_values = identity_initializer([filter_size, filter_size, in_channels, out_channel])
+            init = tf.constant_initializer(kernel_values, dtype=tf.float32)
+            kernel = tf.get_variable(initializer=init, shape=kernel_values.shape, name='kernel')
+
+
+            #kernel = tf.get_variable('kernel', [filter_size, filter_size, in_shape[3], out_channel],
+            #                         tf.float32, initializer=tf.random_normal_initializer(
+            #        stddev=np.sqrt(2.0 / filter_size / filter_size / out_channel)))
+            bias = tf.get_variable('bias', [out_channel], tf.float32, initializer=tf.zeros_initializer())
     # Step 2: add variables to the list of l2 normalized variables
         if kernel not in tf.get_collection(WEIGHT_DECAY_KEY):
             tf.add_to_collection(WEIGHT_DECAY_KEY, kernel)
@@ -220,19 +224,19 @@ def identity_initializer(filter_shape):
 
 # ACCURACY FUNCTIONS ***************************************************************************************************
 
-def compute_accuracy(valid_preds, valid_labels):
-
-    """Computes both pixel accuracy and mean intersection-over-union accuracy"""
-
-    train_pixel_acc = tf.metrics.accuracy(valid_labels, valid_preds)
-    mean_iou = tf.metrics.mean_iou(valid_labels, valid_preds, CLASSES)
-    train_mean_iou = compute_mean_iou(mean_iou[1])
-    return train_pixel_acc[1], train_mean_iou
+def compute_accuracy(valid_preds, valid_labels, name = 'accuracy'):
+    with tf.name_scope(name):
+        #pixel_acc = tf.divide(tf.reduce_sum(tf.cast(tf.equal(valid_labels, valid_preds), dtype=tf.int32)),
+        #                      tf.cast(tf.shape(valid_labels)[0], dtype=tf.int32))
+        _, pixel_acc = tf.metrics.accuracy(valid_labels, valid_preds)
+        #cm = tf.confusion_matrix(valid_labels, valid_preds, num_classes=CLASSES)
+        _, cm = tf.metrics.mean_iou(valid_labels, valid_preds, CLASSES)
+        mean_iou = compute_mean_iou(cm)
+        _, mean_per_class_acc = tf.metrics.mean_per_class_accuracy(valid_labels, valid_preds, CLASSES)
+    return pixel_acc, mean_iou, mean_per_class_acc
 
 def compute_mean_iou(total_cm, name='mean_iou'):
-
     """Compute the mean intersection-over-union via the confusion matrix."""
-
     sum_over_row = tf.to_float(tf.reduce_sum(total_cm, 0))
     sum_over_col = tf.to_float(tf.reduce_sum(total_cm, 1))
     cm_diag = tf.to_float(tf.diag_part(total_cm))
@@ -261,63 +265,65 @@ def compute_mean_iou(total_cm, name='mean_iou'):
         tf.greater(num_valid_entries, 0),
         tf.reduce_sum(iou, name=name) / num_valid_entries,
         0)
+
     return result
 
 # LOAD IMAGES **********************************************************************************************************
 
+def parse_fn(example):
+
+  "Parse TFExample records and perform simple data augmentation."
+
+  feature = {'height': tf.FixedLenFeature([], tf.int64),
+             'width': tf.FixedLenFeature([], tf.int64),
+             'image': tf.FixedLenFeature([], tf.string),
+             'label': tf.FixedLenFeature([], tf.string)}
+
+  parsed = tf.parse_single_example(example, feature)
+
+  image = tf.decode_raw(parsed['image'], tf.float32)
+  label = tf.decode_raw(parsed['label'], tf.float32)
+  height = tf.cast(parsed['height'], tf.int32)
+  width = tf.cast(parsed['width'], tf.int32)
+  image = tf.reshape(image, tf.stack([height, width, 3]))
+  label = tf.reshape(label, tf.stack([height, width, 1]))
+  image = tf.divide(image, 255.)
+
+  # Data Augmentation
+  image, label = random_color_distortion(image, label)
+  image, label = flip_randomly_left_right_image_with_annotation(image, label)
+  #image, label = random_rotation_image_with_annotation(image, label, 5) - I decide not to rotate
+  #image, label = flip_randomly_up_down_image_with_annotation(image, label) - I decide not to flip vertically
+
+  # both height and width have to be multiple multiple of 32
+  target_height = tf.cast((tf.floor(tf.divide(tf.cast(height, dtype=tf.float32),32)))*32, dtype=tf.int32)
+  target_width = tf.cast((tf.floor(tf.divide(tf.cast(width, dtype=tf.float32),32)))*32, dtype=tf.int32)
+
+  image = tf.image.resize_image_with_crop_or_pad(image, target_height, target_width)
+  label = tf.image.resize_image_with_crop_or_pad(label, target_height, target_width)
+
+  # Normalize data and labels (COCO dataset stuff labels start at 92)
+  image = tf.subtract(image, 127. / 255.)
+  label = tf.subtract(label, tf.ones([target_height, target_width, 1]) * 92)
+  label = tf.cast(label, dtype=tf.int32)
+
+  return image, label
+
 def read_and_decode(data_path, epochs, batch_size):
 
-    with tf.Session() as sess:
-        feature = {'image': tf.FixedLenFeature([], tf.string),
-                   'label': tf.FixedLenFeature([], tf.string)}
-
-        # Create a list of filenames and pass it to a queue
-        filename_queue = tf.train.string_input_producer([data_path], num_epochs=epochs)
-
-        # Define a reader and read the next record
-        reader = tf.TFRecordReader()
-        _, serialized_example = reader.read(filename_queue)
-
-        # Decode the record read by the reader
-        features = tf.parse_single_example(serialized_example, features=feature)
-
-        # Convert the image data from string back to the numbers
-        image = tf.decode_raw(features['image'], tf.float32)
-        label = tf.decode_raw(features['label'], tf.float32)
-
-        # Reshape image data into the original shape
-        image = tf.reshape(image, [SEGMENTATION_HEIGHT, SEGMENTATION_WIDTH, 3])
-        label = tf.reshape(label, [SEGMENTATION_HEIGHT, SEGMENTATION_HEIGHT, 1])
-
-        resized_image = tf.image.resize_image_with_crop_or_pad(image=image,
-                                                               target_height=SEGMENTATION_HEIGHT,
-                                                               target_width=SEGMENTATION_WIDTH)
-        resized_label = tf.image.resize_image_with_crop_or_pad(image=label,
-                                                               target_height=SEGMENTATION_HEIGHT,
-                                                               target_width=SEGMENTATION_WIDTH)
-
-        # Creates batches by randomly shuffling tensors
-        images, labels = tf.train.shuffle_batch([resized_image, resized_label], batch_size=batch_size, capacity=30,
-                                                num_threads=1, min_after_dequeue=10, allow_smaller_final_batch=True)
-
-        return images, labels
+    buffer_size = 8 * 500 * 600 * 4
+    dataset = tf.data.TFRecordDataset(data_path, buffer_size=buffer_size, num_parallel_reads=64)
+    dataset = dataset.apply(tf.contrib.data.shuffle_and_repeat(10000, epochs))
+    dataset = dataset.apply(tf.contrib.data.map_and_batch(parse_fn, batch_size, num_parallel_batches=8))
+    dataset = dataset.prefetch(8)
+    iterator = dataset.make_one_shot_iterator()
+    batch_images, batch_labels = iterator.get_next()
+    return batch_images, batch_labels
 
 # DECAY FUNCTIONS ******************************************************************************************************
 
 def lr_decay(learning_rate):
     return (learning_rate * LR_DECAY)
-
-# PREPROCESS DATA ******************************************************************************************************
-
-def preprocess_data(batch_X, batch_Y):
-    train_mean = np.load(DATASET_PATH + 'train_mean.npy')
-    train_mean = np.reshape(train_mean,[1,SEGMENTATION_HEIGHT,SEGMENTATION_WIDTH,3])
-    batch_X = np.subtract(batch_X, train_mean)
-    padding_margin = (IMAGE_HEIGHT - SEGMENTATION_HEIGHT) / 2
-    batch_X = np.pad(batch_X, ((0,0),(padding_margin,padding_margin),(padding_margin,padding_margin),(0,0)), 'symmetric')
-    batch_X = batch_X / 255
-    batch_Y = np.subtract(batch_Y, np.ones((batch_Y.shape[0], SEGMENTATION_HEIGHT, SEGMENTATION_WIDTH, 1)) * 92)
-    return batch_X, batch_Y
 
 # SUMMARY FUNCTIONS ******************************************************************************************************
 
