@@ -38,14 +38,12 @@ def myatrouconv(x, filter_size, out_channel, output_stride, pad='SAME', name='at
     in_channels = in_shape[-1]
     with tf.variable_scope(name):
         with tf.device('/CPU:0'):
-            kernel_values = identity_initializer([filter_size, filter_size, in_channels, out_channel])
-            init = tf.constant_initializer(kernel_values, dtype=tf.float32)
-            kernel = tf.get_variable(initializer=init, shape=kernel_values.shape, name='kernel')
-
-
-            #kernel = tf.get_variable('kernel', [filter_size, filter_size, in_shape[3], out_channel],
-            #                         tf.float32, initializer=tf.random_normal_initializer(
-            #        stddev=np.sqrt(2.0 / filter_size / filter_size / out_channel)))
+            #kernel_values = identity_initializer([filter_size, filter_size, in_channels, out_channel])
+            #init = tf.constant_initializer(kernel_values, dtype=tf.float32)
+            #kernel = tf.get_variable(initializer=init, shape=kernel_values.shape, name='kernel')
+            kernel = tf.get_variable('kernel', [filter_size, filter_size, in_shape[3], out_channel],
+                                     tf.float32, initializer=tf.random_normal_initializer(
+                    stddev=np.sqrt(2.0 / filter_size / filter_size / out_channel)))
             bias = tf.get_variable('bias', [out_channel], tf.float32, initializer=tf.zeros_initializer())
     # Step 2: add variables to the list of l2 normalized variables
         if kernel not in tf.get_collection(WEIGHT_DECAY_KEY):
@@ -57,7 +55,7 @@ def myatrouconv(x, filter_size, out_channel, output_stride, pad='SAME', name='at
     return  atrous
 
 def mybn(x, is_train, name='bn'):
-    moving_average_decay = 0.9
+    moving_average_decay = 0.9997
     with tf.variable_scope(name):
         decay = moving_average_decay
         # Get batch mean and var, which will be used during training
@@ -72,15 +70,46 @@ def mybn(x, is_train, name='bn'):
                                    initializer=tf.zeros_initializer())
             gamma = tf.get_variable('gamma', batch_var.get_shape(), tf.float32,
                                     initializer=tf.ones_initializer())
-        update = 1.0 - decay
-        update_mu = mu.assign_sub(update * (mu - batch_mean))
-        update_sigma = sigma.assign_sub(update * (sigma - batch_var))
+        update_mu = tf.assign(mu, mu*decay + batch_mean * (1 - decay))
+        update_sigma = tf.assign(sigma, sigma*decay + batch_var * (1 - decay))
         tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, update_mu)
         tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, update_sigma)
         mean, var = tf.cond(is_train, lambda: (batch_mean, batch_var),
                             lambda: (mu, sigma))
         bn = tf.nn.batch_normalization(x, mean, var, beta, gamma, 1e-5)
     return bn
+
+def mygn(x, G=32, eps=1e-5, name='gn'):
+    with tf.variable_scope(name):
+        # NHWC to NCHW
+        x = tf.transpose(x, [0, 3, 1, 2])
+
+        _, channels, _, _ = x.get_shape().as_list()
+
+        shape = tf.shape(x)
+        N = shape[0]
+        C = shape[1]
+        H = shape[2]
+        W = shape[3]
+
+        x = tf.reshape(x, [N, G, C//G, H, W])
+
+        group_mean, group_var = tf.nn.moments(x, [2, 3, 4], keep_dims=True)
+        x = (x - group_mean) / tf.sqrt(group_var + eps)
+
+        with tf.device('/CPU:0'):
+            beta = tf.get_variable('beta', [channels], initializer=tf.constant_initializer(0.0))
+            gamma = tf.get_variable('gamma', [channels], initializer=tf.constant_initializer(1.0))
+
+        gamma = tf.reshape(gamma, [1, C, 1, 1])
+        beta = tf.reshape(beta, [1, C, 1, 1])
+
+        x = tf.reshape(x, [N, C, H, W]) * gamma + beta
+
+        # NCHW to NHWC
+        x = tf.transpose(x, [0, 2, 3, 1])
+
+    return x
 
 def myrelu(x, leakness=0.0, name=None):
     if leakness > 0.0:
@@ -106,10 +135,10 @@ def first_residual_block(x, kernel, out_channel, strides, is_train, name="unit")
             shortcut = myconv(x, 1, out_channel, strides, name='shortcut') # 1x1 conv to obtain out_channel maps
         # Residual
         x = myconv(x, kernel, out_channel, strides, name='conv_1')
-        x = mybn(x, is_train, name='bn_1')
+        x = mygn(x, name='gn_1')
         x = myrelu(x, name='relu_1')
         x = myconv(x, kernel, out_channel, 1, name='conv_2')
-        x = mybn(x, is_train, name='bn_2')
+        x = mygn(x, name='gn_2')
         # Merge
         x = x + shortcut
         x = myrelu(x, name='relu_2')
@@ -123,10 +152,10 @@ def residual_block(x, kernel, is_train, name="unit"):
         shortcut = x
         # Residual
         x = myconv(x, kernel, num_channel, 1, name='conv_1')
-        x = mybn(x, is_train, name='bn_1')
+        x = mygn(x, name='gn_1')
         x = myrelu(x, name='relu_1')
         x = myconv(x, kernel, num_channel, 1, name='conv_2')
-        x = mybn(x, is_train, name='bn_2')
+        x = mygn(x, name='gn_2')
         # Merge
         x = x + shortcut
         x = myrelu(x, name='relu_2')
@@ -148,10 +177,10 @@ def first_residual_atrous_block(x, kernel, out_channel, strides, is_train, name=
             shortcut = myatrouconv(x, 1, out_channel, strides, name='shortcut') # 1x1 conv to obtain out_channel maps
         # Residual
         x = myatrouconv(x, kernel, out_channel, strides, name='conv_1')
-        x = mybn(x, is_train, name='bn_1')
+        x = mygn(x, name='gn_1')
         x = myrelu(x, name='relu_1')
         x = myatrouconv(x, kernel, out_channel, strides, name='conv_2')
-        x = mybn(x, is_train, name='bn_2')
+        x = mygn(x, name='gn_2')
         # Merge
         x = x + shortcut
         x = myrelu(x, name='relu_2')
@@ -165,10 +194,10 @@ def residual_atrous_block(x, kernel, is_train, name="unit"):
         shortcut = x
         # Residual
         x = myatrouconv(x, kernel, num_channel, 2, name='conv_1')
-        x = mybn(x, is_train, name='bn_1')
+        x = mygn(x, name='gn_1')
         x = myrelu(x, name='relu_1')
         x = myatrouconv(x, kernel, num_channel, 2, name='conv_2')
-        x = mybn(x, is_train, name='bn_2')
+        x = mygn(x, name='gn_2')
         # Merge
         x = x + shortcut
         x = myrelu(x, name='relu_2')
@@ -182,22 +211,22 @@ def atrous_spatial_pyramid_pooling_block(x, is_train, depth=256, name = 'aspp'):
         print('\tBuilding aspp unit: %s' % scope.name)
         # Branch 0: 1x1 conv
         branch0 = myconv(x, filters[0], depth, atrous_rates[0], name='branch0')
-        branch0 = mybn(branch0, is_train, name='bn_0')
+        branch0 = mygn(branch0, name='gn_0')
         # Branch 1: 3x3 atrous_conv (rate = 6)
         branch1 = myatrouconv(x, filters[1], depth, atrous_rates[1], name='branch1')
-        branch1 = mybn(branch1, is_train, name='bn_1')
+        branch1 = mygn(branch1, name='gn_1')
         # Branch 2: 3x3 atrous_conv (rate = 12)
         branch2 = myatrouconv(x, filters[2], depth, atrous_rates[2], name='branch2')
-        branch2 = mybn(branch2, is_train, name='bn_2')
+        branch2 = mygn(branch2, name='gn_2')
         # Branch 3: 3x3 atrous_conv (rate = 18)
         branch3 = myatrouconv(x, filters[3], depth, atrous_rates[3], name='branch3')
-        branch3 = mybn(branch3, is_train, name='bn_3')
+        branch3 = mygn(branch3, name='gn_3')
         # Branch 4: image pooling
         # 4.1 global average pooling
         branch4 = tf.reduce_mean(x, [1, 2], name='global_average_pooling', keepdims=True)
         # 4.2 1x1 convolution with 256 filters and batch normalization
         branch4 = myconv(x, filters[4], depth, atrous_rates[4], name='brach4')
-        branch4 = mybn(branch4, is_train, name='bn_4')
+        branch4 = mygn(branch4, name='gn_4')
         # 4.3 bilinearly upsample features
         branch4 = tf.image.resize_bilinear(branch4, input_size, name='branch4_upsample')
         # Output
@@ -213,14 +242,9 @@ def identity_initializer(filter_shape):
 
     filter = np.zeros((filter_shape), dtype='float32')
     center = filter_shape[1]/2
-    filter[ center, center, center, :] = np.ones((filter_shape[3]),dtype='float32')
+    for i in range(filter_shape[2]):
+            filter[center, center, i, i] = np.float(1)
     return filter
-
-    #filter = np.zeros((filter_shape), dtype='float32')
-    #center = filter_shape[1]/2
-    #for i in range(filter_shape[2]):
-    #        filter[center, center, i, i] = np.float(1)
-    #return filter
 
 # ACCURACY FUNCTIONS ***************************************************************************************************
 

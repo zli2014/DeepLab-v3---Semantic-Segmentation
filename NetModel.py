@@ -48,13 +48,13 @@ class deepLabNet:
         print('\tBuilding unit: conv1')
         with tf.variable_scope('conv1'):
             x = myconv(X, kernels[0], filters[0], strides[0], name="conv")
-            x = mybn(x, is_train, name="bn")
+            x = mygn(x, name="gn")
             x = myrelu(x)
             self.shape_conv1 = tf.shape(x)
             x = tf.nn.max_pool(x, [1, 3, 3, 1], [1, 2, 2, 1], 'SAME')
 
         # conv2_x
-        x = residual_block(x,kernels[1], is_train, name='conv2_1')
+        x = residual_block(x, kernels[1], is_train, name='conv2_1')
         x = residual_block(x, kernels[1], is_train, name='conv2_2')
         self.shape_conv2 = tf.shape(x)
 
@@ -138,7 +138,7 @@ class deepLabNet:
 
         # Add l2 loss
         costs = [tf.nn.l2_loss(var) for var in tf.get_collection(WEIGHT_DECAY_KEY)]
-        l2_loss = tf.multiply(WEIGHT_DECAY, tf.add_n(costs))
+        l2_loss = tf.multiply(self.weight_decay, tf.add_n(costs))
         total_loss = loss + l2_loss
 
         # Loss and total loss - save in summary
@@ -179,7 +179,8 @@ class deepLabNet:
                 [self.train_loss, self.train_pixel_acc, self.train_mean_iou_acc, self.train_mean_per_class_acc, self.train_step],
                 feed_dict=feed_dict, options=run_options)
             if np.isnan(tr_loss):
-                print('got NaN as the loss value for 1 image')
+                #print('got NaN as the loss value for 1 image')
+                epoch_loss += float('inf')
             else:
                 epoch_loss += tr_loss
 
@@ -202,7 +203,8 @@ class deepLabNet:
             v_loss, v_pixel_acc, v_mean_iou_acc, v_mean_per_class_acc = \
                 sess.run([self.val_loss, self.val_pixel_acc, self.val_mean_iou_acc, self.val_mean_per_class_acc], options=run_options)
             if np.isnan(v_loss):
-                print('got NaN as the loss value for 1 image')
+                #print('got NaN as the loss value for 1 image')
+                epoch_loss += float('inf')
             else:
                 epoch_loss += v_loss
 
@@ -213,7 +215,7 @@ class deepLabNet:
 
     def train(self, args):
 
-        learning_rate, dropout, epochs = args
+        learning_rate, dropout, self.weight_decay, epochs = args
         initial_learning_rate = learning_rate
         epochs = int(epochs)
 
@@ -297,7 +299,7 @@ class deepLabNet:
 
                 # Train for 1 epoch on training set
                 tc, ta_pix, ta_iou, ta_class = self.train_epoch(sess, learning_rate)
-                ta_class = np.mean(ta_class[np.nonzero(ta_class)])
+                ta_class = np.mean(ta_class)
                 train_cost.append(tc)
                 train_accuracy_pix.append(ta_pix)
                 train_accuracy_iou.append(ta_iou)
@@ -305,7 +307,7 @@ class deepLabNet:
 
                 # Compute cost/accuracy on val dataset
                 vc, va_pix, va_iou, va_class = self.evaluate_model_on_val_set(sess)
-                va_class = np.mean(va_class[np.nonzero(va_class)])
+                va_class = np.mean(va_class)
                 val_cost.append(vc)
                 val_accuracy_pix.append(va_pix)
                 val_accuracy_iou.append(va_iou)
@@ -322,25 +324,28 @@ class deepLabNet:
                 print('val mean iou accuracy: {:.2f}%'.format(va_iou * 100))
                 print('val mean per class accuracy: {:.2f}% \n'.format(va_class * 100))
 
-                # Save model if specified
-                if epochs > OPTIMIZATION_EPOCHS and SAVE_MODEL == 1:
-                    save_path = saver.save(sess, SAVE_PATH + "fcn32_model.ckpt", global_step=epoch)
-                    print("Epoch %d - Model saved in path: %s \n" % (epoch, save_path))
-                    sys.stdout.flush()
-
                 # Check if loss is lower than in previous epochs
                 if vc <= best_val_loss:
+
+                    # Save model if specified
+                    if epochs > OPTIMIZATION_EPOCHS and SAVE_MODEL == 1:
+                        save_path = saver.save(sess, SAVE_PATH + "deeplab_model.ckpt", global_step=epoch)
+                        print("Epoch %d - Model saved in path: %s \n" % (epoch, save_path))
+                        sys.stdout.flush()
+
+                    best_val_loss = vc
                     lowest_val_loss_epoch = epoch
                     patience = 0
                 else:
                     patience += 1
-                    if patience == 10:
+                    if patience == 15:
                         print('End of training due to early stopping! \n')
                         break
 
                 # Increase epoch and decay learning rate
                 epoch += 1
-                if epoch % 50 == 0:
+                if epoch % 30 == 0:
+                    print('\nLearning rate decay\n')
                     learning_rate = lr_decay(learning_rate)
 
                 # Check end time and compute epoch time lapse
@@ -351,18 +356,18 @@ class deepLabNet:
                 sys.stdout.flush()
 
         except tf.errors.OutOfRangeError:
-            print('End of training! \n')
+            print('\nEnd of training! \n')
 
         # Save accuracy and cost
         if epochs > OPTIMIZATION_EPOCHS and SAVE_MODEL == 1:
-            np.save('fcn32_train_loss.npy', train_cost)
-            np.save('fcn32_val_loss.npy', val_cost)
-            np.save('fcn32_train_accuracy_pix.npy', train_accuracy_pix)
-            np.save('fcn32_val_accuracy_pix.npy', val_accuracy_pix)
-            np.save('fcn32_train_accuracy_iou.npy', train_accuracy_iou)
-            np.save('fcn32_val_accuracy_iou.npy', val_accuracy_iou)
-            np.save('fcn32_train_accuracy_class.npy', train_accuracy_per_class)
-            np.save('fcn32_val_accuracy_class.npy', val_accuracy_per_class)
+            np.save('deeplab_train_loss.npy', train_cost)
+            np.save('deeplab_val_loss.npy', val_cost)
+            np.save('deeplab_train_accuracy_pix.npy', train_accuracy_pix)
+            np.save('deeplab_val_accuracy_pix.npy', val_accuracy_pix)
+            np.save('deeplab_train_accuracy_iou.npy', train_accuracy_iou)
+            np.save('deeplab_val_accuracy_iou.npy', val_accuracy_iou)
+            np.save('deeplab_train_accuracy_class.npy', train_accuracy_per_class)
+            np.save('deeplab_val_accuracy_class.npy', val_accuracy_per_class)
 
         # Close summary writer
         if DEBUG:
@@ -376,8 +381,9 @@ class deepLabNet:
         sess.close()
         tf.reset_default_graph()
 
-        print('learningRate: ', initial_learning_rate, 'Dropout: ', dropout)
+        print('Learning Rate: ', initial_learning_rate, 'Dropout: ', dropout, 'Weight Decay', self.weight_decay)
         print('Loss function: ', np.min(val_cost))
+        print('\nBest model obtained in epoch ' + str(lowest_val_loss_epoch) + '\n')
         print('----------------- \n')
         sys.stdout.flush()
 
@@ -412,18 +418,19 @@ if __name__ == "__main__":
 
     space = hp.choice('experiment number',
                       [
-                          (hp.uniform('learning_rate', 0.01, 0.0001),
-                           hp.uniform('dropout_prob', 0.5, 0.8),
-                           hp.uniform('Epochs', OPTIMIZATION_EPOCHS, OPTIMIZATION_EPOCHS))
+                          (hp.uniform('learning_rate', 0.0001, 0.01),
+                           hp.uniform('dropout_prob', 0.5, 1.0),
+                           hp.uniform('weight_decay', 1.0e-6, 1.0e-4),
+                           hp.quniform('Epochs', OPTIMIZATION_EPOCHS, OPTIMIZATION_EPOCHS+1, OPTIMIZATION_EPOCHS))
                       ])
 
     best = fmin(execute, space, algo=tpe.suggest, max_evals=EVALUATIONS)
 
-    print('Best learningRate: ', best['learning_rate'], 'Best Dropout: ', best['dropout_prob'])
+    print('Best learningRate: ', best['learning_rate'], 'Best Dropout: ', best['dropout_prob'], 'Best Weight Decay', best['weight_decay'])
     print('-----------------\n')
     print('Starting training with optimized hyperparameters... \n')
 
-    execute((best['learning_rate'], best['dropout_prob'], 2))
+    execute((best['learning_rate'], best['dropout_prob'], best['weight_decay'], 150))
 
     # Check that prediction works
     # tf.reset_default_graph()
