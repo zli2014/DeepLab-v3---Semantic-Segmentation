@@ -329,7 +329,6 @@ def parse_fn(example):
 
   # Normalize data and labels
   image = tf.subtract(image, 127./255.)
-  #label = tf.subtract(label, tf.ones([513, 513, 1]) * 6)
   label = tf.cast(label, dtype=tf.int32)
 
   return image, label
@@ -363,7 +362,6 @@ def parse_fn_val_and_test(example):
 
   # Normalize data and labels
   image = tf.subtract(image, 127. / 255.)
-  # label = tf.subtract(label, tf.ones([513, 513, 1]) * 6)
   label = tf.cast(label, dtype=tf.int32)
 
   return image, label
