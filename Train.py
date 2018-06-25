@@ -1,20 +1,23 @@
-#https://github.com/dalgu90/resnet-18-tensorflow
-
 # IMPORTS
-
 from GlobalVariables import*
-from UsefulFunctions import*
 from datetime import datetime
 from hyperopt import hp, fmin, tpe
 import sys
 import os
 
-# RUN OPTIONS
-
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-run_options = tf.RunOptions(report_tensor_allocations_upon_oom = True)
-
-FLAGS = tf.app.flags.FLAGS
+model = 'resnet18'
+#path = '/DEEPLAB'
+path = '/Users/albertbou/PycharmProjects/DeepLab_v3'
+sys.path.append( path + '/models')
+if model == 'resnet18':
+    from Utils_18 import *
+    import ResNet18_deeplab
+elif model == 'resnet101':
+    from Utils_101 import*
+    import ResNet101_deeplab
+else:
+    print('Specified model is no valid')
+    sys.exit(1)
 
 # NETWORK CLASS
 
@@ -25,110 +28,17 @@ class deepLabNet:
     def __init__(self):
 
         self.lr = tf.placeholder(tf.float32)
-
-    # BUILD UP THE MODEL ***********************************************************************************************
-
-    def build_model(self, X, y, is_train=tf.constant(True), pkeep = 1): # ResNet 18
-
-        if pkeep != 1:
-            print('\nBuilding train model')
-        else:
-            print('\nBuilding validation model')
-
-        # filters = [128, 128, 256, 512, 1024]
-        filters = [64, 64, 128, 256, 512]
-        kernels = [7, 3, 3, 3, 3]
-        strides = [2, 0, 2, 2, 2]
-
-        size = tf.shape(X)
-        height = size[1]
-        width = size[2]
-
-        # conv1
-        print('\tBuilding unit: conv1')
-        with tf.variable_scope('conv1'):
-            x = myconv(X, kernels[0], filters[0], strides[0], name="conv")
-            x = mygn(x, name="gn")
-            x = myrelu(x)
-            self.shape_conv1 = tf.shape(x)
-            x = tf.nn.max_pool(x, [1, 3, 3, 1], [1, 2, 2, 1], 'SAME')
-
-        # conv2_x
-        x = residual_block(x, kernels[1], is_train, name='conv2_1')
-        x = residual_block(x, kernels[1], is_train, name='conv2_2')
-        self.shape_conv2 = tf.shape(x)
-
-        # conv3_x
-        x = first_residual_block(x, kernels[2], filters[2], strides[2], is_train, name='conv3_1')
-        x = residual_block(x, kernels[2], is_train, name='conv3_2')
-        self.shape_conv3 = tf.shape(x)
-
-        # conv4_x
-        x = first_residual_block(x, kernels[3], filters[3], strides[3], is_train, name='conv4_1')
-        x = residual_block(x, kernels[3], is_train, name='conv4_2')
-        self.shape_conv4 = tf.shape(x)
-
-        # conv5_x
-        x = first_residual_atrous_block(x, kernels[4], filters[4], strides[4], is_train, name='conv5_1')
-        x = residual_atrous_block(x, kernels[4], is_train, name='conv5_2')
-        self.shape_conv5 = tf.shape(x)
-
-        # aspp
-        x = atrous_spatial_pyramid_pooling_block(x, is_train, depth=256, name = 'aspp_1')
-        self.shape_aspp = tf.shape(x)
-
-        print('\tBuilding unit: class scores') # Maybe another layer ???
-        x = myconv(x, 1, CLASSES, 1, name="class_scores")
-        self.shape_class_scores = tf.shape(x)
-
-        # upsample logits
-        print('\tBuilding unit: upsample')
-        logits = tf.image.resize_images(
-            x,
-            tf.stack([height, width]),
-            method=tf.image.ResizeMethod.BILINEAR,
-            align_corners=False)
-
-        self.shape_upsampled_logits = tf.shape(logits)
-
-        logits_by_num_classes = tf.reshape(logits, [-1, CLASSES])
-
-        # Probs and Predictions
-        probs = tf.nn.softmax(logits, name='softmax_tensor')
-        probs_by_num_classes = tf.reshape(probs, [-1, CLASSES])
-        preds = tf.argmax(logits, axis=3, output_type=tf.int32)
-        preds_flat = tf.reshape(preds, [-1, ])
-        labels_flat = tf.reshape(y, [-1, ])
-
-        # Remove non valid indices
-        valid_indices = tf.multiply(tf.to_int32(labels_flat <= CLASSES - 1), tf.to_int32(labels_flat > -1))
-        valid_probs = tf.dynamic_partition(probs_by_num_classes, valid_indices, num_partitions=2)[1]
-        valid_logits = tf.dynamic_partition(logits_by_num_classes, valid_indices, num_partitions=2)[1]
-        valid_labels = tf.dynamic_partition(labels_flat, valid_indices, num_partitions=2)[1]
-        valid_preds = tf.dynamic_partition(preds_flat, valid_indices, num_partitions=2)[1]
-        summary_histogram(valid_preds, name="valid_preds")
-
-        # ACCURACY *****************************************************************************************************
-
-        self.pixel_acc, self.mean_iou, self.per_class_acc = compute_accuracy(valid_preds, valid_labels)
-        summary_scalar(self.pixel_acc, name="pixel_accuracy")
-        summary_scalar(self.mean_iou, name="mean_iou")
-
-        # COST *********************************************************************************************************
-
-        self.cross_entropy = tf.reduce_mean((tf.nn.sparse_softmax_cross_entropy_with_logits(logits=valid_logits,
-                                                                              labels=valid_labels,
-                                                                              name="entropy")))
-        sys.stdout.flush()
-
-        return valid_logits, valid_preds, self.cross_entropy, self.pixel_acc, self.mean_iou, self.per_class_acc
+        self.weight_decay = tf.placeholder(tf.float32)
 
     # BUILD TRAIN OPERATION ********************************************************************************************
 
     def build_train_op(self, X, y, is_train, pkeep):
 
         # Build Model
-        logits, preds, loss, pixel_acc, mean_iou, per_class_acc = self.build_model(X, y, is_train, pkeep)
+        if model == 'resnet18':
+            logits, preds, loss, pixel_acc, mean_iou, per_class_acc = ResNet18_deeplab.deeplab_rn18(X, y, is_train, pkeep)
+        elif model == 'resnet101':
+            logits, preds, loss, pixel_acc, mean_iou, per_class_acc = ResNet101_deeplab.deeplab_rn101(X, y, is_train, pkeep)
 
         # Learning rate - save in summary
         tf.summary.scalar('learing_rate', self.lr)
@@ -158,12 +68,12 @@ class deepLabNet:
 
         # Batch normalization moving average update
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-        train_op = tf.group(*(update_ops + [apply_grad_op])) # runs all operarions
+        train_op = tf.group(*(update_ops + [apply_grad_op])) # runs all operations
 
         print("Setting up summary op")
         summary_op = tf.summary.merge_all()
 
-        return loss, pixel_acc, mean_iou, per_class_acc, train_op, summary_op
+        return total_loss, pixel_acc, mean_iou, per_class_acc, train_op, summary_op
 
     # TRAIN EPOCH ******************************************************************************************************
 
@@ -172,12 +82,12 @@ class deepLabNet:
         sess.run(self.reset_op)
         epoch_loss = 0
         steps = int(float(TRAIN_IMAGES) * (float(CROPS_PER_IMAGE) / float(BATCH_SIZE)))
+        feed_dict = {self.lr: current_learning_rate, self.weight_decay: self.w_decay}
 
         for i in range(steps):
-            feed_dict = {self.lr: current_learning_rate}
             tr_loss, tr_pixel_acc, tr_mean_iou_acc, tr_mean_per_class_acc, _ = sess.run(
                 [self.train_loss, self.train_pixel_acc, self.train_mean_iou_acc, self.train_mean_per_class_acc, self.train_step],
-                feed_dict=feed_dict, options=run_options)
+                feed_dict=feed_dict)
             if np.isnan(tr_loss):
                 #print('got NaN as the loss value for 1 image')
                 epoch_loss += float('inf')
@@ -185,7 +95,7 @@ class deepLabNet:
                 epoch_loss += tr_loss
 
             if DEBUG:
-                summary_str = sess.run([self.summary_op], feed_dict=feed_dict, options=run_options)
+                summary_str = sess.run([self.summary_op], feed_dict=feed_dict)
                 self.summary_writer.add_summary(summary_str)
 
         epoch_loss = epoch_loss / steps
@@ -198,10 +108,12 @@ class deepLabNet:
         sess.run(self.reset_op)
         epoch_loss = 0
         steps = int(float(VALIDATION_IMAGES) * (float(CROPS_PER_IMAGE) / float(BATCH_SIZE)))
+        feed_dict = {self.weight_decay: 0.0}
 
         for i in range(steps):
             v_loss, v_pixel_acc, v_mean_iou_acc, v_mean_per_class_acc = \
-                sess.run([self.val_loss, self.val_pixel_acc, self.val_mean_iou_acc, self.val_mean_per_class_acc], options=run_options)
+                sess.run([self.val_loss, self.val_pixel_acc, self.val_mean_iou_acc, self.val_mean_per_class_acc],
+                         feed_dict = feed_dict)
             if np.isnan(v_loss):
                 #print('got NaN as the loss value for 1 image')
                 epoch_loss += float('inf')
@@ -215,14 +127,14 @@ class deepLabNet:
 
     def train(self, args):
 
-        learning_rate, dropout, self.weight_decay, epochs = args
+        learning_rate, dropout, self.w_decay, epochs = args
         initial_learning_rate = learning_rate
         epochs = int(epochs)
 
         # Get images and labels
         with tf.device('/cpu:0'):
             train_images, train_labels = read_and_decode(DATASET_PATH + 'train_dataset.tfrecords', epochs, BATCH_SIZE)
-            val_images, val_labels = read_and_decode(DATASET_PATH + 'validation_dataset.tfrecords', epochs, BATCH_SIZE)
+            val_images, val_labels = read_and_decode_val_and_test(DATASET_PATH + 'validation_dataset.tfrecords', epochs, BATCH_SIZE)
 
         # Define both train and val models
         with tf.variable_scope("model"):
@@ -240,14 +152,22 @@ class deepLabNet:
         self.reset_op = [tf.initialize_variables(stream_vars)]
 
         # Load Imagenet Pretrained Weights
-        print("\nLoading ResNet18 pretrained weights")
-        resnet18_weights = np.load("resnet18_weights.npy")
+        print("\nLoading ResNet pretrained weights")
+
+        if model == "resnet18":
+            resnet_weights = np.load("resnet18_weights.npy")
+        elif model == "resnet101":
+            resnet_weights = np.load("resnet101_weights.npy")
+
         all_vars = tf.trainable_variables()
         notloaded = []
         print('Successful:')
         for v in all_vars:
             try:
-                assign_op = v.assign(resnet18_weights.item().get(v.op.name[6:]))
+                if model == "resnet18":
+                    assign_op = v.assign(resnet_weights.item().get(v.op.name[6:]))
+                elif model == "resnet101":
+                    assign_op = v.assign(resnet_weights.item().get(v.op.name[:]))
                 sess.run(assign_op)
                 print('\t' + v.op.name)
             except Exception, e:
@@ -338,15 +258,17 @@ class deepLabNet:
                     patience = 0
                 else:
                     patience += 1
-                    if patience == 15:
+                    # if 5 epochs without any improvement, decay learning rate
+                    if patience % 5 == 0:
+                        print('\nLearning rate decay\n')
+                        learning_rate = lr_decay(learning_rate)
+                    # if 15 epochs without any improvement, early stopping
+                    if patience == 30:
                         print('End of training due to early stopping! \n')
                         break
 
                 # Increase epoch and decay learning rate
                 epoch += 1
-                if epoch % 30 == 0:
-                    print('\nLearning rate decay\n')
-                    learning_rate = lr_decay(learning_rate)
 
                 # Check end time and compute epoch time lapse
                 end = datetime.now()
@@ -389,51 +311,54 @@ class deepLabNet:
 
         return (np.min(val_cost))
 
-    def predict(self):
-
-        # Initialization
-        init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
-        sess = tf.Session()
-        sess.run(init_op)
-
-        # Create a saver
-        saver = tf.train.Saver()
-        saver.restore(sess, RESTORE_PATH)
-        print('Load checkpoint %s' % RESTORE_PATH)
-        print("Model restored.")
-
 if __name__ == "__main__":
     # 1. Imports
     import tensorflow as tf
     import numpy as np
 
-    def execute(args):
+    def deeplab(args):
         tf.reset_default_graph()
         model = deepLabNet()
         output = model.train(args)
         tf.reset_default_graph()
         return output
 
-    # define a search space
 
-    space = hp.choice('experiment number',
-                      [
-                          (hp.uniform('learning_rate', 0.0001, 0.01),
-                           hp.uniform('dropout_prob', 0.5, 1.0),
-                           hp.uniform('weight_decay', 1.0e-6, 1.0e-4),
-                           hp.quniform('Epochs', OPTIMIZATION_EPOCHS, OPTIMIZATION_EPOCHS+1, OPTIMIZATION_EPOCHS))
-                      ])
+    search = "grid"  # "grid" or "random"
 
-    best = fmin(execute, space, algo=tpe.suggest, max_evals=EVALUATIONS)
+    if search == "random":
 
-    print('Best learningRate: ', best['learning_rate'], 'Best Dropout: ', best['dropout_prob'], 'Best Weight Decay', best['weight_decay'])
-    print('-----------------\n')
-    print('Starting training with optimized hyperparameters... \n')
+        # define a search space
+        space = hp.choice('experiment number',
+                          [
+                              (hp.uniform('learning_rate', 0.0001, 0.01),
+                               hp.uniform('dropout_prob', 0.5, 1.0),
+                               hp.uniform('weight_decay', 1.0e-6, 1.0e-4),
+                               hp.quniform('Epochs', OPTIMIZATION_EPOCHS, OPTIMIZATION_EPOCHS + 1, OPTIMIZATION_EPOCHS))
+                          ])
 
-    execute((best['learning_rate'], best['dropout_prob'], best['weight_decay'], 150))
+        best = fmin(deeplab, space, algo=tpe.suggest, max_evals=EVALUATIONS)
 
-    # Check that prediction works
-    # tf.reset_default_graph()
-    # model = deepLabNet()
-    # model.build_train_op()
-    # model.predict()
+        print('Best learningRate: ', best['learning_rate'], 'Best Dropout: ', best['dropout_prob'], 'Best weight decay',
+              best['weight_decay'])
+        print('-----------------\n')
+        print('Starting training with optimized hyperparameters... \n')
+        sys.stdout.flush()
+
+        deeplab((best['learning_rate'], best['dropout_prob'], best['weight_decay'], EPOCHS))
+
+    elif search == "grid":
+        min_loss = float('inf')
+        learning_rate = [1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6]
+        dropout_prob = [1.0, 0.75, 0.5]
+        weight_decay = [0.0, 1.0e-4, 1.0e-6]
+        for lr in learning_rate:
+            for dr in dropout_prob:
+                for wd in weight_decay:
+                    loss = deeplab((lr, dr, wd, OPTIMIZATION_EPOCHS))
+                    if (loss < min_loss):
+                        best_lr = lr
+                        best_dr = dr
+                        best_wd = wd
+                        min_loss = loss
+        deeplab((best_lr, best_dr, best_wd, EPOCHS))

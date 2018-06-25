@@ -1,6 +1,5 @@
 
 # IMPORTS
-
 import tensorflow as tf
 from ImageTransformations import*
 from GlobalVariables import*
@@ -165,6 +164,7 @@ def residual_block(x, kernel, is_train, name="unit"):
 
 def first_residual_atrous_block(x, kernel, out_channel, strides, is_train, name="unit"):
     input_channels = x.get_shape().as_list()[-1]
+
     with tf.variable_scope(name) as scope:
         print('\tBuilding residual unit: %s' % scope.name)
         # Shortcut connection
@@ -225,13 +225,16 @@ def atrous_spatial_pyramid_pooling_block(x, is_train, depth=256, name = 'aspp'):
         # 4.1 global average pooling
         branch4 = tf.reduce_mean(x, [1, 2], name='global_average_pooling', keepdims=True)
         # 4.2 1x1 convolution with 256 filters and batch normalization
-        branch4 = myconv(x, filters[4], depth, atrous_rates[4], name='brach4')
+        branch4 = myconv(branch4, filters[4], depth, atrous_rates[4], name='brach4')
         branch4 = mygn(branch4, name='gn_4')
         # 4.3 bilinearly upsample features
         branch4 = tf.image.resize_bilinear(branch4, input_size, name='branch4_upsample')
         # Output
         out = tf.concat([branch0, branch1, branch2, branch3, branch4], axis=3, name='aspp_concat')
+        out = myrelu(out, name= 'out_relu_1')
         out = myconv(out, filters[5], depth, atrous_rates[5], name='aspp_out')
+        out = mygn(out, name='gn_out')
+        out = myrelu(out, name='out_relu_2')
         return out
 
 # INITIALIZER FUNCTIONS ************************************************************************************************
@@ -292,7 +295,7 @@ def compute_mean_iou(total_cm, name='mean_iou'):
 
     return result
 
-# LOAD IMAGES **********************************************************************************************************
+# INPUT PIPELINE *******************************************************************************************************
 
 def parse_fn(example):
 
@@ -303,14 +306,22 @@ def parse_fn(example):
              'image': tf.FixedLenFeature([], tf.string),
              'label': tf.FixedLenFeature([], tf.string)}
 
+  # Decode
   parsed = tf.parse_single_example(example, feature)
-
-  image = tf.decode_raw(parsed['image'], tf.float32)
-  label = tf.decode_raw(parsed['label'], tf.float32)
+  image = tf.decode_raw(parsed['image'], tf.int8)
+  label = tf.decode_raw(parsed['label'], tf.int8)
   height = tf.cast(parsed['height'], tf.int32)
   width = tf.cast(parsed['width'], tf.int32)
   image = tf.reshape(image, tf.stack([height, width, 3]))
   label = tf.reshape(label, tf.stack([height, width, 1]))
+
+  # Random cropping
+  combined = tf.concat([image, label], axis=2)
+  combined_crop = tf.random_crop(combined, [513,513,4])
+  image = tf.slice(combined_crop, [0,0,0], [513,513,3])
+  label = tf.slice(combined_crop, [0,0,3], [513,513,1])
+  label = tf.cast(label, dtype=tf.float32)
+  image = tf.cast(image, dtype=tf.float32)
   image = tf.divide(image, 255.)
 
   # Data Augmentation
@@ -319,27 +330,63 @@ def parse_fn(example):
   #image, label = random_rotation_image_with_annotation(image, label, 5) - I decide not to rotate
   #image, label = flip_randomly_up_down_image_with_annotation(image, label) - I decide not to flip vertically
 
-  # both height and width have to be multiple multiple of 32
-  target_height = tf.cast((tf.floor(tf.divide(tf.cast(height, dtype=tf.float32),32)))*32, dtype=tf.int32)
-  target_width = tf.cast((tf.floor(tf.divide(tf.cast(width, dtype=tf.float32),32)))*32, dtype=tf.int32)
+  # Normalize data and labels
+  image = tf.subtract(image, 127./255.)
+  #label = tf.subtract(label, tf.ones([513, 513, 1]) * 6)
+  label = tf.cast(label, dtype=tf.int32)
 
-  image = tf.image.resize_image_with_crop_or_pad(image, target_height, target_width)
-  label = tf.image.resize_image_with_crop_or_pad(label, target_height, target_width)
+  return image, label
 
-  # Normalize data and labels (COCO dataset stuff labels start at 92)
+def parse_fn_val_and_test(example):
+
+  "Parse TFExample records and perform simple data augmentation."
+
+  feature = {'height': tf.FixedLenFeature([], tf.int64),
+             'width': tf.FixedLenFeature([], tf.int64),
+             'image': tf.FixedLenFeature([], tf.string),
+             'label': tf.FixedLenFeature([], tf.string)}
+
+  # Decode
+  parsed = tf.parse_single_example(example, feature)
+  image = tf.decode_raw(parsed['image'], tf.int8)
+  label = tf.decode_raw(parsed['label'], tf.int8)
+  height = tf.cast(parsed['height'], tf.int32)
+  width = tf.cast(parsed['width'], tf.int32)
+  image = tf.reshape(image, tf.stack([height, width, 3]))
+  label = tf.reshape(label, tf.stack([height, width, 1]))
+
+  # Random cropping
+  combined = tf.concat([image, label], axis=2)
+  combined_crop = tf.random_crop(combined, [513, 513, 4])
+  image = tf.slice(combined_crop, [0, 0, 0], [513, 513, 3])
+  label = tf.slice(combined_crop, [0, 0, 3], [513, 513, 1])
+  label = tf.cast(label, dtype=tf.float32)
+  image = tf.cast(image, dtype=tf.float32)
+  image = tf.divide(image, 255.)
+
+  # Normalize data and labels
   image = tf.subtract(image, 127. / 255.)
-  label = tf.subtract(label, tf.ones([target_height, target_width, 1]) * 92)
+  # label = tf.subtract(label, tf.ones([513, 513, 1]) * 6)
   label = tf.cast(label, dtype=tf.int32)
 
   return image, label
 
 def read_and_decode(data_path, epochs, batch_size):
-
-    buffer_size = 8 * 500 * 600 * 4
+    buffer_size = 500 * 600
     dataset = tf.data.TFRecordDataset(data_path, buffer_size=buffer_size, num_parallel_reads=64)
-    dataset = dataset.apply(tf.contrib.data.shuffle_and_repeat(10000, epochs))
-    dataset = dataset.apply(tf.contrib.data.map_and_batch(parse_fn, batch_size, num_parallel_batches=8))
-    dataset = dataset.prefetch(8)
+    dataset = dataset.apply(tf.contrib.data.shuffle_and_repeat(8000, epochs))
+    dataset = dataset.apply(tf.contrib.data.map_and_batch(parse_fn, batch_size, num_parallel_batches=2))
+    dataset = dataset.prefetch(2)
+    iterator = dataset.make_one_shot_iterator()
+    batch_images, batch_labels = iterator.get_next()
+    return batch_images, batch_labels
+
+def read_and_decode_val_and_test(data_path, epochs, batch_size):
+    buffer_size = 500 * 600
+    dataset = tf.data.TFRecordDataset(data_path, buffer_size=buffer_size, num_parallel_reads=64)
+    dataset = dataset.apply(tf.contrib.data.shuffle_and_repeat(8000, epochs))
+    dataset = dataset.apply(tf.contrib.data.map_and_batch(parse_fn_val_and_test, 1, num_parallel_batches=2))
+    dataset = dataset.prefetch(2)
     iterator = dataset.make_one_shot_iterator()
     batch_images, batch_labels = iterator.get_next()
     return batch_images, batch_labels

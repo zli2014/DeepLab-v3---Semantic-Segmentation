@@ -1,13 +1,6 @@
 
-import pdb
-import pkg_resources
-import tensorflow as tf
 from tensorflow.python.ops import control_flow_ops
-from UsefulFunctions import*
-from GlobalVariables import*
-#import matplotlib.pyplot as plt
-import numpy as np
-import pdb
+from Utils_18 import*
 
 def random_rotation_image_with_annotation(image_tensor, annotation_tensor, max_angle):
 
